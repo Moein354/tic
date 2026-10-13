@@ -23,7 +23,7 @@ class Database:
                     wins INTEGER NOT NULL DEFAULT 0,
                     losses INTEGER NOT NULL DEFAULT 0,
                     draws INTEGER NOT NULL DEFAULT 0,
-                    rating INTEGER NOT NULL DEFAULT 100
+                    rating INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS games (
                     game_id TEXT PRIMARY KEY,
@@ -64,6 +64,68 @@ class Database:
                 );
                 """
             )
+            cursor = await db.execute("PRAGMA user_version")
+            schema_version = int((await cursor.fetchone())[0])
+            if schema_version < 1:
+                await db.execute(
+                    """
+                    WITH result_scores AS (
+                        SELECT id, user_id, result,
+                            COALESCE(
+                                SUM(
+                                    CASE result
+                                        WHEN 'win' THEN 50
+                                        WHEN 'draw' THEN 25
+                                        ELSE 0
+                                    END
+                                ) OVER (
+                                    PARTITION BY user_id
+                                    ORDER BY id
+                                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                                ),
+                                0
+                            ) AS score_before
+                        FROM game_results
+                    )
+                    UPDATE game_results
+                    SET score_before = (
+                            SELECT score_before
+                            FROM result_scores
+                            WHERE result_scores.id = game_results.id
+                        ),
+                        score_after = (
+                            SELECT score_before
+                            FROM result_scores
+                            WHERE result_scores.id = game_results.id
+                        ) + CASE result
+                            WHEN 'win' THEN 50
+                            WHEN 'draw' THEN 25
+                            ELSE 0
+                        END,
+                        delta = CASE result
+                            WHEN 'win' THEN 50
+                            WHEN 'draw' THEN 25
+                            ELSE 0
+                        END
+                    """
+                )
+                await db.execute(
+                    """
+                    UPDATE users
+                    SET rating = COALESCE((
+                        SELECT SUM(
+                            CASE result
+                                WHEN 'win' THEN 50
+                                WHEN 'draw' THEN 25
+                                ELSE 0
+                            END
+                        )
+                        FROM game_results
+                        WHERE game_results.user_id = users.user_id
+                    ), 0)
+                    """
+                )
+                await db.execute("PRAGMA user_version = 1")
             await db.commit()
 
     async def save_inline_game(self, game: Any) -> None:
@@ -247,8 +309,8 @@ class Database:
                     )
             for user_id, opponent_id, opponent_name, role, result in players:
                 before = score_rows[user_id]
-                requested_delta = 10 if result == "win" else -5 if result == "loss" else 2
-                after = max(0, before + requested_delta)
+                requested_delta = 50 if result == "win" else 25 if result == "draw" else 0
+                after = before + requested_delta
                 delta = after - before
                 deltas[user_id] = delta
                 await db.execute(

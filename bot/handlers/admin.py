@@ -34,7 +34,11 @@ async def admin_command(message: Message, admin_id: int) -> None:
     if not message.from_user or not _is_admin(message.from_user.id, admin_id):
         await message.answer("⛔ دسترسی به پنل مدیریت ندارید.")
         return
-    await message.answer("🛠 پنل مدیریت\n\nیک گزینه را انتخاب کنید:", reply_markup=admin_menu())
+    admin_waiting.add(message.from_user.id)
+    await message.answer(
+        "🛠 پنل مدیریت\n\nیک گزینه را انتخاب کنید یا شناسهٔ عددی کاربر را بفرستید:",
+        reply_markup=admin_menu(),
+    )
 
 
 @router.callback_query(F.data == "admin:panel")
@@ -42,17 +46,20 @@ async def admin_panel(query: CallbackQuery, admin_id: int) -> None:
     if not _is_admin(query.from_user.id, admin_id):
         await query.answer("دسترسی ندارید.", show_alert=True)
         return
+    admin_waiting.add(query.from_user.id)
     await query.answer()
     if query.message:
         await query.message.edit_text(
-            "🛠 <b>پنل مدیریت</b>\n\nیک گزینه را انتخاب کنید:",
+            "🛠 <b>پنل مدیریت</b>\n\nیک گزینه را انتخاب کنید یا شناسهٔ عددی کاربر را بفرستید:",
             parse_mode="HTML",
             reply_markup=admin_menu(),
         )
 
 
 @router.callback_query(F.data.startswith("admin:players:"))
-async def admin_players(query: CallbackQuery, db: Database, admin_id: int) -> None:
+async def admin_players(
+    query: CallbackQuery, db: Database, admin_id: int
+) -> None:
     if not _is_admin(query.from_user.id, admin_id):
         await query.answer("دسترسی ندارید.", show_alert=True)
         return
@@ -91,6 +98,7 @@ async def admin_home(query: CallbackQuery, admin_id: int) -> None:
     if not _is_admin(query.from_user.id, admin_id):
         await query.answer("دسترسی ندارید.", show_alert=True)
         return
+    admin_waiting.discard(query.from_user.id)
     await query.answer()
     if query.message:
         await query.message.edit_text(
@@ -99,35 +107,27 @@ async def admin_home(query: CallbackQuery, admin_id: int) -> None:
         )
 
 
-@router.callback_query(F.data == "admin:search")
-async def admin_search(query: CallbackQuery, admin_id: int) -> None:
-    if not _is_admin(query.from_user.id, admin_id):
-        await query.answer("دسترسی ندارید.", show_alert=True)
-        return
-    admin_waiting.add(query.from_user.id)
-    await query.answer()
-    if query.message:
-        await query.message.answer("شناسهٔ عددی کاربر را ارسال کنید:")
-
-
 @router.message(F.text, lambda message: bool(message.from_user and message.from_user.id in admin_waiting))
 async def admin_user_id(message: Message, db: Database, admin_id: int) -> None:
     if not message.from_user or not _is_admin(message.from_user.id, admin_id):
         return
     raw_id = (message.text or "").strip()
     if not raw_id.isdigit():
-        await message.answer("شناسه باید فقط شامل عدد باشد. دوباره ارسال کنید:")
         return
-    admin_waiting.discard(message.from_user.id)
     user = await db.get_user(int(raw_id))
     if not user:
-        await message.answer("کاربری با این شناسه در آمار ربات پیدا نشد.")
+        await message.answer(
+            "کاربری با این شناسه در آمار ربات پیدا نشد.",
+            reply_markup=admin_menu(),
+        )
         return
     username = f"@{escape(user['username'])}" if user["username"] else "ندارد"
     await message.answer(
         f"{profile_text(user)}\n👤 Username: {username}\n💬 {_private_chat_link(user)}",
         parse_mode="HTML",
-        reply_markup=admin_profile_keyboard(user["user_id"], user["username"]),
+        reply_markup=admin_profile_keyboard(
+            user["user_id"], user["username"], show_back=False
+        ),
     )
 
 
@@ -153,7 +153,9 @@ async def admin_user_callback(query: CallbackQuery, db: Database, admin_id: int)
 
 
 @router.callback_query(F.data.startswith("admin:history:"))
-async def admin_history(query: CallbackQuery, db: Database, admin_id: int) -> None:
+async def admin_history(
+    query: CallbackQuery, db: Database, admin_id: int
+) -> None:
     if not _is_admin(query.from_user.id, admin_id):
         await query.answer("دسترسی ندارید.", show_alert=True)
         return

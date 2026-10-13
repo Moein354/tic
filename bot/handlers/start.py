@@ -8,6 +8,7 @@ from bot.database.db import Database
 from bot.keyboards.keyboards import (
     back_to_menu_keyboard,
     difficulty_keyboard,
+    leaderboard_keyboard,
     main_menu,
 )
 
@@ -40,17 +41,6 @@ def profile_text(user: dict) -> str:
     )
 
 
-def help_text() -> str:
-    return (
-        "🎮 <b>راهنمای بازی دوز</b>\n\n"
-        "برای بازی با ربات، «بازی با هوش مصنوعی» را انتخاب و سطح را مشخص کنید.\n"
-        "برای بازی گروهی، دستور /game را در گروه بفرستید؛ دو بازیکن با زدن "
-        "دکمهٔ ورود وارد بازی می‌شوند. فقط بازیکنان و فقط در نوبت خودشان "
-        "می‌توانند حرکت کنند.\n\n"
-        "دستورها: /start، /game، /profile، /help"
-    )
-
-
 @router.message(Command("start"))
 async def start_command(message: Message, db: Database, admin_id: int) -> None:
     if not message.from_user:
@@ -74,11 +64,6 @@ async def profile_command(message: Message, db: Database) -> None:
     record = await db.get_user(user.id)
     if record:
         await message.answer(profile_text(record), parse_mode="HTML")
-
-
-@router.message(Command("help"))
-async def help_command(message: Message) -> None:
-    await message.answer(help_text(), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "menu:ai")
@@ -129,14 +114,45 @@ async def menu_profile(query: CallbackQuery, db: Database) -> None:
         )
 
 
-@router.callback_query(F.data == "menu:help")
-async def menu_help(query: CallbackQuery) -> None:
+@router.callback_query(F.data.startswith("menu:leaderboard"))
+async def menu_leaderboard(query: CallbackQuery, db: Database) -> None:
+    parts = (query.data or "").split(":")
+    if len(parts) < 2 or parts[1] != "leaderboard":
+        await query.answer("درخواست نامعتبر است.", show_alert=True)
+        return
+    if len(parts) == 2:
+        page = 0
+    elif len(parts) == 3 and parts[2].isdigit():
+        page = int(parts[2])
+    else:
+        await query.answer("شمارهٔ صفحه نامعتبر است.", show_alert=True)
+        return
+
+    users, total = await db.list_played_users(page, page_size=5)
+    if page > 0 and not users:
+        await query.answer("این صفحه وجود ندارد.", show_alert=True)
+        return
+
+    lines = ["🏆 <b>برترین بازیکنان</b>\n⭐ امتیاز: برد ۵۰ | مساوی ۲۵ | باخت ۰"]
+    medals = ("🥇", "🥈", "🥉")
+    for index, user in enumerate(users, page * 5 + 1):
+        rank = medals[index - 1] if index <= len(medals) else f"{index}."
+        lines.append(
+            f"\n{rank} <a href=\"tg://user?id={user['user_id']}\">"
+            f"{escape(user['first_name'])}</a>"
+            f" — ⭐ {user['rating']} امتیاز"
+            f"\n   🏆 {user['wins']} برد | 🤝 {user['draws']} مساوی"
+            f" | ❌ {user['losses']} باخت"
+        )
+    if total == 0:
+        lines.append("\nهنوز بازی‌ای ثبت نشده است.")
+
     await query.answer()
     if query.message:
         await query.message.edit_text(
-            help_text(),
+            "\n".join(lines),
             parse_mode="HTML",
-            reply_markup=back_to_menu_keyboard(),
+            reply_markup=leaderboard_keyboard(page, total),
         )
 
 
@@ -151,7 +167,7 @@ async def menu_about(query: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "menu:contact")
-async def menu_contact(query: CallbackQuery, admin_id: int) -> None:
+async def menu_contact(query: CallbackQuery) -> None:
     await query.answer()
     if query.message:
         await query.message.edit_text(

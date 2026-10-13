@@ -9,10 +9,12 @@ from aiogram.enums import ChatType
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
+    ChosenInlineResult,
     InlineQuery,
     InlineQueryResultArticle,
     InputTextMessageContent,
     Message,
+    User,
 )
 
 from bot.database.db import Database
@@ -25,7 +27,6 @@ from bot.keyboards.keyboards import (
     ai_symbol_keyboard,
     difficulty_keyboard,
     inline_join_keyboard,
-    inline_start_keyboard,
     join_keyboard,
     main_menu,
 )
@@ -52,6 +53,10 @@ def _mention(user_id: int, name: str) -> str:
     return f'<a href="tg://user?id={user_id}">{escape(name)}</a>'
 
 
+def _display_name(user: User) -> str:
+    return " ".join(part for part in (user.first_name, user.last_name) if part)
+
+
 def _choose_ai_move(game: AiGame) -> int:
     position = (
         game.user_id,
@@ -72,13 +77,14 @@ def _choose_ai_move(game: AiGame) -> int:
 
 def _group_caption(game: GroupGame) -> str:
     if game.status == "waiting":
-        if game.x_id is None:
+        if game.x_id is None and game.o_id is None:
             return "🎮 <b>بازی دوز</b>\n\nبرای شروع بازی روی دکمهٔ زیر بزنید؛ دو نفر اول وارد بازی می‌شوند."
-        return (
-            "🎮 <b>بازی دوز</b>\n\n"
-            f"❌ بازیکن X: {_mention(game.x_id, game.x_name or 'بازیکن')}\n"
-            "⏳ منتظر بازیکن دوم..."
-        )
+        players = []
+        if game.x_id is not None:
+            players.append(f"❌ بازیکن X: {_mention(game.x_id, game.x_name or 'بازیکن')}")
+        if game.o_id is not None:
+            players.append(f"⭕ بازیکن O: {_mention(game.o_id, game.o_name or 'بازیکن')}")
+        return "🎮 <b>بازی دوز</b>\n\n" + "\n".join(players) + "\n⏳ منتظر بازیکن دوم..."
     return (
         "🎮 <b>بازی دوز</b>\n"
         "👥 <b>بازیکنان:</b>\n"
@@ -139,28 +145,109 @@ def _restore_inline_game(data: dict) -> GroupGame:
     )
 
 
+def _inline_game_owner(game_id: str) -> tuple[str, int] | None:
+    parts = game_id.split("_")
+    if (
+        len(parts) != 3
+        or parts[0] not in ("x", "o")
+        or not parts[1].isdigit()
+        or len(parts[2]) not in (12, 32)
+    ):
+        return None
+    try:
+        int(parts[2], 16)
+        owner_id = int(parts[1])
+    except ValueError:
+        return None
+    return parts[0].upper(), owner_id
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")[:max_bytes]
+    return encoded.decode("utf-8", errors="ignore")
+
+
 @router.inline_query()
 async def inline_game_search(query: InlineQuery) -> None:
-    result_id = uuid.uuid4().hex
-    await query.answer(
-        results=[
+    results = []
+    owner = query.from_user
+    for mark, symbol in (("X", "❌"), ("O", "⭕")):
+        result_id = f"{mark.lower()}_{owner.id}_{uuid.uuid4().hex[:12]}"
+        results.append(
             InlineQueryResultArticle(
                 id=result_id,
-                title="🎮 شروع بازی دوز",
-                description="بازی دوز دونفره؛ دو نفر اول وارد بازی می‌شوند",
+                title=f"{symbol} شروع بازی با {mark}",
+                description=f"بازی دوز دونفره؛ شما با مهرهٔ {mark} بازی می‌کنید",
                 input_message_content=InputTextMessageContent(
-                    message_text=(
-                        "🎮 <b>بازی دوز</b>\n\n"
-                        "برای شروع بازی روی دکمهٔ زیر بزنید؛ دو نفر اول وارد بازی می‌شوند."
-                    ),
+                    message_text=f"🎮 <b>بازی دوز — شروع‌کننده با {symbol} {mark}</b>",
                     parse_mode="HTML",
                 ),
-                reply_markup=inline_start_keyboard(result_id),
+                reply_markup=inline_join_keyboard(result_id, _display_name(owner)),
             )
-        ],
+        )
+    await query.answer(
+        results=results,
         cache_time=0,
         is_personal=True,
     )
+
+
+@router.chosen_inline_result()
+async def create_selected_inline_game(
+    result: ChosenInlineResult, db: Database
+) -> None:
+    game_id = result.result_id
+    parsed_game = _inline_game_owner(game_id)
+    if parsed_game is None:
+        logger.warning("Ignoring inline result with invalid game id %s", game_id)
+        return
+    if not result.inline_message_id:
+        return
+
+    user = result.from_user
+    mark, owner_id = parsed_game
+    if user.id != owner_id:
+        logger.error("Inline result owner mismatch for game %s", game_id)
+        return
+    display_name = _display_name(user)
+    await db.ensure_user(user.id, user.username, user.first_name)
+    async with inline_creation_lock:
+        try:
+            saved_game = await db.get_inline_game(game_id)
+            if saved_game:
+                if saved_game["inline_message_id"] == result.inline_message_id:
+                    game = _restore_inline_game(saved_game)
+                    if mark == "X" and game.x_id == user.id:
+                        game.x_name = display_name
+                    elif mark == "O" and game.o_id == user.id:
+                        game.o_name = display_name
+                    await db.save_inline_game(game)
+                    inline_games[game_id] = game
+                    return
+                logger.warning("Inline game id %s is already assigned to another message", game_id)
+                return
+            active_game = await db.get_active_inline_game(result.inline_message_id)
+            if active_game:
+                logger.warning(
+                    "An active inline game already exists for message %s",
+                    result.inline_message_id,
+                )
+                return
+            game = GroupGame(
+                game_id=game_id,
+                chat_id=None,
+                message_id=None,
+                inline_message_id=result.inline_message_id,
+                x_id=user.id if mark == "X" else None,
+                x_name=display_name if mark == "X" else None,
+                o_id=user.id if mark == "O" else None,
+                o_name=display_name if mark == "O" else None,
+            )
+            await db.save_inline_game(game)
+        except aiosqlite.Error:
+            logger.exception("Failed to persist selected inline game %s", game_id)
+            return
+        inline_games[game_id] = game
 
 
 @router.message(Command("game"))
@@ -168,7 +255,10 @@ async def game_command(message: Message) -> None:
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         await _create_group_game(message)
     else:
-        await message.answer("برای بازی با هوش مصنوعی یک سطح را انتخاب کنید:", reply_markup=difficulty_keyboard())
+        await message.answer(
+            "برای بازی با هوش مصنوعی یک سطح را انتخاب کنید:",
+            reply_markup=difficulty_keyboard(),
+        )
 
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.text)
@@ -230,8 +320,16 @@ async def join_group_game(query: CallbackQuery, db: Database) -> None:
 
 @router.callback_query(F.data.startswith("is:"))
 async def start_inline_game(query: CallbackQuery, db: Database) -> None:
+    parts = (query.data or "").split(":")
     if not query.from_user or not query.inline_message_id:
         await query.answer("این دکمه فقط در پیام inline قابل استفاده است.", show_alert=True)
+        return
+    if len(parts) == 2:
+        mark = "X"
+    elif len(parts) == 3 and parts[2] in ("X", "O"):
+        mark = parts[2]
+    else:
+        await query.answer("انتخاب مهره نامعتبر است.", show_alert=True)
         return
     user = query.from_user
     await db.ensure_user(user.id, user.username, user.first_name)
@@ -246,8 +344,10 @@ async def start_inline_game(query: CallbackQuery, db: Database) -> None:
             chat_id=None,
             message_id=None,
             inline_message_id=query.inline_message_id,
-            x_id=user.id,
-            x_name=user.first_name,
+            x_id=user.id if mark == "X" else None,
+            x_name=user.first_name if mark == "X" else None,
+            o_id=user.id if mark == "O" else None,
+            o_name=user.first_name if mark == "O" else None,
         )
         try:
             await db.save_inline_game(game)
@@ -256,30 +356,58 @@ async def start_inline_game(query: CallbackQuery, db: Database) -> None:
             await query.answer("ساخت بازی ناموفق بود؛ دوباره تلاش کنید.", show_alert=True)
             return
         inline_games[game_id] = game
-    await query.answer("شما بازیکن X هستید؛ منتظر بازیکن دوم بمانید.")
+    await query.answer(f"شما بازیکن {mark} هستید؛ منتظر بازیکن دوم بمانید.")
     await _edit_game_message(
-        query, game, _group_caption(game), inline_join_keyboard(game_id)
+        query, game, _group_caption(game), inline_join_keyboard(game_id, _display_name(user))
     )
 
 
 @router.callback_query(F.data.startswith("ii:"))
 async def join_inline_game(query: CallbackQuery, db: Database) -> None:
-    game_id = (query.data or "").partition(":")[2]
+    callback_data = (query.data or "").partition(":")[2]
+    game_id, _, owner_name = callback_data.partition(":")
+    if not query.from_user or not query.inline_message_id:
+        await query.answer("این دکمه فقط در پیام inline قابل استفاده است.", show_alert=True)
+        return
+    user = query.from_user
     game = inline_games.get(game_id)
     if game is None:
         try:
             saved_game = await db.get_inline_game(game_id)
+            if saved_game:
+                game = _restore_inline_game(saved_game)
+                inline_games[game_id] = game
+            else:
+                owner_data = _inline_game_owner(game_id)
+                if owner_data is not None:
+                    mark, owner_id = owner_data
+                    async with inline_creation_lock:
+                        # Recheck after acquiring the lock in case another callback initialized it.
+                        saved_game = await db.get_inline_game(game_id)
+                        if saved_game:
+                            game = _restore_inline_game(saved_game)
+                        elif not await db.get_active_inline_game(query.inline_message_id):
+                            game = GroupGame(
+                                game_id=game_id,
+                                chat_id=None,
+                                message_id=None,
+                                inline_message_id=query.inline_message_id,
+                                x_id=owner_id if mark == "X" else None,
+                                x_name=owner_name or "بازیکن" if mark == "X" else None,
+                                o_id=owner_id if mark == "O" else None,
+                                o_name=owner_name or "بازیکن" if mark == "O" else None,
+                            )
+                            await db.save_inline_game(game)
+                        if game:
+                            inline_games[game_id] = game
         except aiosqlite.Error:
-            logger.exception("Failed to load inline game %s", game_id)
-            await query.answer("بازی پیدا نشد؛ از ربات بخواهید بازی تازه بسازد.", show_alert=True)
+            logger.exception("Failed to initialize inline game %s", game_id)
+            await query.answer("ساخت بازی ناموفق بود؛ دوباره تلاش کنید.", show_alert=True)
             return
-        if saved_game:
-            game = _restore_inline_game(saved_game)
-            inline_games[game_id] = game
-    if game is None or not query.from_user or not query.inline_message_id:
+    if game is None:
         await query.answer("این بازی inline دیگر در دسترس نیست.", show_alert=True)
         return
-    user = query.from_user
+    display_name = _display_name(user)
     await db.ensure_user(user.id, user.username, user.first_name)
     async with game.lock:
         if game.inline_message_id != query.inline_message_id:
@@ -288,15 +416,23 @@ async def join_inline_game(query: CallbackQuery, db: Database) -> None:
         if game.status != "waiting":
             await query.answer("این بازی شروع شده یا پایان یافته است.", show_alert=True)
             return
-        if game.x_id == user.id:
-            await query.answer("شما بازیکن X هستید؛ منتظر بازیکن دوم بمانید.", show_alert=True)
+        if user.id in (game.x_id, game.o_id):
+            mark = "X" if game.x_id == user.id else "O"
+            await query.answer(
+                f"شما بازیکن {mark} هستید؛ منتظر بازیکن دوم بمانید.",
+                show_alert=True,
+            )
             return
-        game.o_id, game.o_name = user.id, user.first_name
+        previous_players = (game.x_id, game.x_name, game.o_id, game.o_name)
+        if game.x_id is None:
+            game.x_id, game.x_name = user.id, display_name
+        else:
+            game.o_id, game.o_name = user.id, display_name
         game.status, game.turn = "playing", "X"
         try:
             await db.save_inline_game(game)
         except aiosqlite.Error:
-            game.o_id, game.o_name = None, None
+            game.x_id, game.x_name, game.o_id, game.o_name = previous_players
             game.status = "waiting"
             logger.exception("Failed to persist inline game join %s", game_id)
             await query.answer("ورود به بازی ذخیره نشد؛ دوباره تلاش کنید.", show_alert=True)
@@ -324,7 +460,9 @@ async def start_ai_game(query: CallbackQuery, db: Database) -> None:
 
 
 @router.callback_query(F.data.startswith("aisym:"))
-async def start_ai_game_with_symbol(query: CallbackQuery, db: Database) -> None:
+async def start_ai_game_with_symbol(
+    query: CallbackQuery, db: Database
+) -> None:
     parts = (query.data or "").split(":")
     if (
         len(parts) != 3
@@ -356,7 +494,12 @@ async def start_ai_game_with_symbol(query: CallbackQuery, db: Database) -> None:
     await query.answer()
     await query.message.edit_text(
         _ai_board_text(game, labels[difficulty]),
-        reply_markup=board_keyboard(game.board, game.game_id, allow_back=True),
+        reply_markup=board_keyboard(
+            game.board,
+            game.game_id,
+            allow_back=True,
+        ),
+        parse_mode="HTML",
     )
 
 
@@ -426,7 +569,11 @@ async def replay_ai_game(query: CallbackQuery) -> None:
     await query.answer("بازی جدید شروع شد")
     await query.message.edit_text(
         _ai_board_text(game, labels[game.difficulty]),
-        reply_markup=board_keyboard(game.board, game.game_id, allow_back=True),
+        reply_markup=board_keyboard(
+            game.board,
+            game.game_id,
+            allow_back=True,
+        ),
         parse_mode="HTML",
     )
 
@@ -463,7 +610,9 @@ def _ai_finish_text(game: AiGame, outcome: str, delta: int) -> str:
 
 
 @router.callback_query(F.data.startswith("b:"))
-async def play_move(query: CallbackQuery, db: Database, admin_id: int) -> None:
+async def play_move(
+    query: CallbackQuery, db: Database, admin_id: int
+) -> None:
     parts = (query.data or "").split(":")
     if len(parts) != 3 or not parts[2].isdigit() or not query.from_user:
         await query.answer("حرکت نامعتبر است.", show_alert=True)
@@ -639,7 +788,9 @@ async def play_move(query: CallbackQuery, db: Database, admin_id: int) -> None:
                 await query.message.edit_text(
                     text,
                     reply_markup=ai_finished_keyboard(
-                        game.board, game.game_id, query.from_user.id == admin_id
+                        game.board,
+                        game.game_id,
+                        query.from_user.id == admin_id,
                     ),
                     parse_mode="HTML",
                 )
@@ -650,6 +801,8 @@ async def play_move(query: CallbackQuery, db: Database, admin_id: int) -> None:
             await query.message.edit_text(
                 _ai_board_text(game, labels[game.difficulty]),
                 reply_markup=board_keyboard(
-                    game.board, game.game_id, allow_back=True
+                    game.board,
+                    game.game_id,
+                    allow_back=True,
                 ),
             )
