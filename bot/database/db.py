@@ -242,6 +242,30 @@ class Database:
             )
             return [dict(row) for row in await cursor.fetchall()], total
 
+    async def get_played_user_rank(self, user_id: int) -> Optional[dict[str, Any]]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT ranked.*
+                FROM (
+                    SELECT users.*,
+                        ROW_NUMBER() OVER (
+                            ORDER BY users.rating DESC, users.wins DESC, users.user_id ASC
+                        ) AS rank
+                    FROM users
+                    WHERE EXISTS (
+                        SELECT 1 FROM game_results
+                        WHERE game_results.user_id = users.user_id
+                    )
+                ) AS ranked
+                WHERE ranked.user_id = ?
+                """,
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
     async def record_game(
         self,
         *,

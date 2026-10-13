@@ -594,7 +594,7 @@ async def ai_game_main_menu(query: CallbackQuery, admin_id: int) -> None:
         )
 
 
-def _ai_finish_text(game: AiGame, outcome: str, delta: int) -> str:
+def _ai_finish_text(game: AiGame, outcome: str) -> str:
     if outcome == game.human_mark:
         result = "🏆 شما برنده شدید"
     elif outcome == game.ai_mark:
@@ -605,8 +605,7 @@ def _ai_finish_text(game: AiGame, outcome: str, delta: int) -> str:
         )
     else:
         result = "🤝 بازی مساوی شد"
-    signed = f"+{delta}" if delta > 0 else str(delta)
-    return f"{result}\n\n⭐ امتیاز شما: {signed}"
+    return result
 
 
 @router.callback_query(F.data.startswith("b:"))
@@ -754,7 +753,6 @@ async def play_move(
         if game.board[index] is not None:
             await query.answer("این خانه قبلاً انتخاب شده است.", show_alert=True)
             return
-        previous_board = game.board.copy()
         game.board[index] = game.human_mark
         outcome = winner(game.board)
         if not outcome and not is_draw(game.board):
@@ -764,25 +762,8 @@ async def play_move(
         draw = outcome is None and is_draw(game.board)
         if outcome or draw:
             result = outcome or "draw"
-            try:
-                deltas = await db.record_game(
-                    game_id=game.game_id,
-                    game_type=f"ai_{game.difficulty}",
-                    group_id=None,
-                    x_id=game.user_id if game.human_mark == "X" else 0,
-                    o_id=game.user_id if game.human_mark == "O" else None,
-                    x_name=game.user_name if game.human_mark == "X" else "هوش مصنوعی",
-                    o_name="هوش مصنوعی" if game.human_mark == "X" else game.user_name,
-                    outcome=result,
-                    human_role=game.human_mark,
-                )
-            except aiosqlite.Error:
-                game.board[:] = previous_board
-                logger.exception("Failed to save completed AI game %s", game_id)
-                await query.answer("ذخیرهٔ نتیجه ناموفق بود.", show_alert=True)
-                return
             game.status = "finished"
-            text = _ai_finish_text(game, result, deltas[game.user_id])
+            text = _ai_finish_text(game, result)
             await query.answer()
             if query.message:
                 await query.message.edit_text(

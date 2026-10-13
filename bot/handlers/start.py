@@ -132,6 +132,7 @@ async def menu_leaderboard(query: CallbackQuery, db: Database) -> None:
     if page > 0 and not users:
         await query.answer("این صفحه وجود ندارد.", show_alert=True)
         return
+    personal_rank = await db.get_played_user_rank(query.from_user.id)
 
     lines = ["🏆 <b>برترین بازیکنان</b>\n⭐ امتیاز: برد ۵۰ | مساوی ۲۵ | باخت ۰"]
     medals = ("🥇", "🥈", "🥉")
@@ -146,6 +147,13 @@ async def menu_leaderboard(query: CallbackQuery, db: Database) -> None:
         )
     if total == 0:
         lines.append("\nهنوز بازی‌ای ثبت نشده است.")
+    if personal_rank:
+        lines.append(
+            f"\n👤 <b>رتبهٔ شما:</b> {personal_rank['rank']} از {total}"
+            f" — ⭐ {personal_rank['rating']} امتیاز"
+        )
+    else:
+        lines.append("\n👤 <b>رتبهٔ شما:</b> هنوز بازی‌ای ثبت نکرده‌اید.")
 
     await query.answer()
     if query.message:
