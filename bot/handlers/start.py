@@ -183,3 +183,17 @@ async def menu_contact(query: CallbackQuery) -> None:
             parse_mode="HTML",
             reply_markup=back_to_menu_keyboard(),
         )
+
+
+@router.callback_query(F.data == "menu:help")
+async def menu_help(query: CallbackQuery) -> None:
+    await query.answer()
+    if query.message:
+        await query.message.edit_text(
+            "❔ <b>راهنما</b>\n\n"
+            "اگر مشکلی داشتید یا به راهنمایی نیاز داشتید، به یکی از آیدی‌های زیر پیام بدهید:\n"
+            '• <a href="https://t.me/Trollsobi">@Trollsobi</a>\n'
+            '• <a href="https://t.me/Moein_915">@Moein_915</a>',
+            parse_mode="HTML",
+            reply_markup=back_to_menu_keyboard(),
+        )

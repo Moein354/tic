@@ -8,6 +8,7 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🎮 شروع بازی", callback_data="menu:ai")],
         [InlineKeyboardButton(text="👤 پروفایل من", callback_data="menu:profile")],
         [InlineKeyboardButton(text="🏆 برترین بازیکنان", callback_data="menu:leaderboard")],
+        [InlineKeyboardButton(text="❔ راهنما", callback_data="menu:help")],
     ]
     if is_admin:
         rows.append(
